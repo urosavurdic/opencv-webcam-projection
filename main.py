@@ -1,117 +1,119 @@
-# if you    try this code in your compiler be sure to change the size of the images depending on your webcam
+"""
+Projects a still image onto a coloured object held up to the webcam.
 
-import numpy as np
+Green and blue objects in view are outlined live. Click one and the program
+locks onto its bounding box: from then on, that region of every frame is
+replaced by the corresponding region of the chosen image, so the picture
+appears to be painted onto the object.
+
+Press q to quit.
+"""
+import argparse
+
 import cv2
+import numpy as np
 
-# promenljiva koja identifikuje da li je doslo do klika
-provera = False
-# promenljive koje pamte 2D polozaj zeljenog frejma
-a, b, c, d = -1, -1, -1, -1
-# promenljive koje pamte lokaciju misa gde je kliknuo
-x, y = -1, -1
-# odre]ivanje ranga boja koje dolaze u obzir
-lower = np.array([40, 40, 20])
-upper = np.array([135, 255, 255])
+# HSV range covering the green-to-blue band the tracker looks for
+LOWER_HSV = np.array([40, 40, 20])
+UPPER_HSV = np.array([135, 255, 255])
 
-# povezivanje sa kamerom!
-cap = cv2.VideoCapture(0)
-
-# odabiranje zeljene slike
-image = cv2.imread("nature.jpg")
-image = cv2.resize(image, (1024, 576))
+MIN_CONTOUR_AREA = 500
 
 
-# generise konture oko svih plavih i zelenih objekata do klika a posle njega projektuje sliku na zadati objekat
-def napravi_konture(m):
-    global x
-    global y
-    global a
-    global b
-    global c
-    global d
-    global provera
-    if not provera:
-        contures, hierarchy = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if len(contures) != 0:
-            for contour in contures:
-                if cv2.contourArea(contour) > 500:
-                    x2, y2, w, h = cv2.boundingRect(contour)
-                    if x > x2 and x < x2 + w and y > y2 and y < y2 + h:
-                        provera = True
-                        a = x2
-                        b = x2 + w
-                        c = y2
-                        d = y2 + h
-                        print(a, b, c, d)
-                    else:
-                        cv2.rectangle(frame, (x2, y2), (x2 + w, y2 + h), (0, 0, 255), 3)
+class ProjectionMapper:
+    """Holds the tracker state that the mouse callback and the loop share."""
+
+    def __init__(self, image):
+        self.image = image
+        self.locked = False
+        self.click = None          # (x, y) of the last click
+        self.box = None            # (x1, y1, x2, y2) of the locked object
+
+    def on_mouse(self, event, x, y, flags, params):
+        """Records where the user last clicked."""
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.click = (x, y)
+
+    def update_from_contours(self, mask, frame):
+        """
+        Outlines every large coloured blob, and locks on if the last click
+        landed inside one of them.
+        """
+        if self.locked:
+            return
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            if cv2.contourArea(contour) <= MIN_CONTOUR_AREA:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            if self.click and (x < self.click[0] < x + w) and (y < self.click[1] < y + h):
+                self.box = (x, y, x + w, y + h)
+                self.locked = True
+                return
+
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 3)
+
+    def render(self, frame, mask):
+        """Replaces the locked region of the frame with the image."""
+        x1, y1, x2, y2 = self.box
+        height, width = frame.shape[:2]
+
+        # Restrict the colour mask to the locked box. Both corners are
+        # (x, y): passing them as (x2, x1), (y2, y1) silently produced a
+        # degenerate rectangle and nothing was ever masked.
+        box_mask = np.zeros((height, width), np.uint8)
+        cv2.rectangle(box_mask, (x1, y1), (x2, y2), 255, -1)
+        target = cv2.bitwise_and(box_mask, mask)
+
+        # Knock the object out of the frame, then fill the hole with the image
+        without_object = frame - cv2.bitwise_and(frame, frame, mask=target)
+        return np.where(without_object == 0, self.image, without_object)
 
 
-# funkcija izbacuje deo pod maskom
-def filtriraj(frame, k):
-    # kreira sliku pre filtriranja
-    res = cv2.bitwise_and(frame, frame, mask=k)
-    cv2.imshow("Res", res)
-    # ckreira filtiranu sliku
-    return frame - res
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", default="nature.jpg", help="image to project")
+    parser.add_argument("--camera", type=int, default=0, help="camera index")
+    args = parser.parse_args()
 
+    image = cv2.imread(args.image)
+    if image is None:
+        raise SystemExit(f"Could not read image: {args.image}")
 
-# funkcija hvata poslednje kliknutu koordinatu misa
-def klik(event, x1, y1, flags, parameters):
-    global x
-    global y
-    if event == cv2.EVENT_LBUTTONDOWN:
-        x, y = x1, y1
+    capture = cv2.VideoCapture(args.camera)
+    if not capture.isOpened():
+        raise SystemExit(f"Could not open camera {args.camera}")
 
+    # Match the image to the camera rather than assuming a fixed resolution:
+    # a hard-coded size breaks on any webcam that does not happen to match.
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    mapper = ProjectionMapper(cv2.resize(image, (width, height)))
 
-if not cap.isOpened():
-    print("Error opening video stream or file")
+    cv2.namedWindow("Frame")
+    cv2.setMouseCallback("Frame", mapper.on_mouse)  # registered once, not per frame
 
-while cap.isOpened():
-    # formira se skroz crna slika
-    slika_filtar = np.zeros((576, 1024, 1), np.uint8)
-    # prikayuje se skroz crna flika
-
-    # snima se frejm po frejm
-    ret, frame = cap.read()
-
-    # detektuju se boje
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    cv2.imshow("HSV", hsv)
-
-    maska = cv2.inRange(hsv, lower, upper)
-    cv2.imshow("Maska", maska)
-
-    # crating lines
-    napravi_konture(maska)
-    if provera:
-        # slika koja ce sluziti kao filtar definise se do kraja tacnije ocrtava koji segmet treba da isfiltrira
-        slika_filtar = cv2.rectangle(slika_filtar, (b, a), (d, c), (255, 255, 255), -1)
-        cv2.imshow("slika filtar", slika_filtar)
-
-        # formira ce maska koja ce filtrirati zeljeni segment
-        final_filtar = cv2.bitwise_and(slika_filtar, maska)
-        cv2.imshow("Krajnje", final_filtar)
-        f = filtriraj(frame, final_filtar)
-        # cv2.imshow("maska", maska)
-        final = np.where(f == 0, image, f)
-        cv2.imshow('Filtered', f)
-        # prikazuje filtriran snimak
-        cv2.imshow('Final', final)
-
-    if ret:
-
-        cv2.imshow('Frame', frame)
-        cv2.setMouseCallback('Frame', klik)
-        # Pritiskom na q se izlazi iz programa
-        if cv2.waitKey(25) & 0xFF == ord('q'):
+    while True:
+        ok, frame = capture.read()
+        if not ok or frame is None:
             break
-    else:
-        break
 
-# osloba]a objekat koji snima
-cap.release()
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, LOWER_HSV, UPPER_HSV)
 
-# Zatvara sve prozorw
+        mapper.update_from_contours(mask, frame)
+        if mapper.locked:
+            cv2.imshow("Projected", mapper.render(frame, mask))
 
-cv2.destroyAllWindows()
+        cv2.imshow("Frame", frame)
+        if cv2.waitKey(25) & 0xFF == ord("q"):
+            break
+
+    capture.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
