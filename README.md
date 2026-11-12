@@ -36,7 +36,7 @@ pixels is discarded as noise. When a click lands inside a contour's bounding
 box, that box is stored and the tracker stops looking for new objects.
 
 From then on the mask is restricted to the locked box, the object is subtracted
-out of the frame, and the resulting hole is filled from the image — which is why
+out of the frame, and the resulting hole is filled from the image. That is why
 the picture appears to sit on the object rather than float over it.
 
 | Path | What it is |
@@ -46,4 +46,4 @@ the picture appears to sit on the object rather than float over it.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
